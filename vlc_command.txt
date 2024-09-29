@@ -1,0 +1,14 @@
+cvlc --alsa-audio-device=hw:0,0 --extraintf rc --rc-host=localhost:4212 ~/Music/sri_playlist.m3u 
+
+Explanation
+audio device option is to force to aux
+extraintf is for having control over the audio while playing
+rc host is for sending the commands via telnet
+
+
+
+A
+
+
+
+
