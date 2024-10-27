@@ -1,13 +1,21 @@
-from flask import Flask, jsonify
+from flask import Flask
 import subprocess
 import os
 import signal
 import psutil
+import logging
+import random
+from logging.handlers import RotatingFileHandler
 
 app = Flask(__name__)
 
-# Store the VLC process
-vlc_process = None
+# Setup rotating logs
+log_file = '/home/sri/HomeAutomation/log/server.log'
+handler = RotatingFileHandler(log_file, maxBytes=1000, backupCount=0)  # Rotate after 1000 bytes, keep 0 backup, rotate on the same file
+formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+handler.setFormatter(formatter)
+app.logger.addHandler(handler)
+app.logger.setLevel(logging.INFO)
 
 def is_homebridge_running():
     """Check if Homebridge is running."""
@@ -16,74 +24,130 @@ def is_homebridge_running():
             return True
     return False
 
+def is_vlc_running():
+    """Check if VLC is running by looking for the process in the system."""
+    for proc in psutil.process_iter(['pid', 'name']):
+        if 'vlc' in proc.info['name']:
+            return True
+    return False
+
+def start_vlc_server():
+    """Start VLC in the background using --one-instance."""
+    if not is_vlc_running():
+        vlc_command = [
+            "cvlc",
+            "--alsa-audio-device=hw:0,0", 
+            "--extraintf", "rc", 
+            "--rc-host=localhost:4212", 
+            "--one-instance",  # Ensure only one instance of VLC runs
+            "--no-video"
+        ]
+        subprocess.Popen(vlc_command)
+        app.logger.info("VLC server started in the background.")
+    else:
+        app.logger.info("VLC is already running in the background.")
+
 @app.route('/play_playlist', methods=['POST'])
 def play_playlist():
-
-    global vlc_process
-    if vlc_process is None:  # Check if VLC is not already running
-        vlc_command = ["cvlc", "--alsa-audio-device=hw:0,0", "--extraintf", "rc", "--rc-host=localhost:4212", "/home/sri/Music/sri_playlist.m3u"]
-        vlc_process = subprocess.Popen(vlc_command)
-        return jsonify({"status": "VLC started playing the playlist"}), 200
+    start_vlc_server()
+    """Play a playlist."""
+    if is_vlc_running():
+        try:
+            send_command('clear')
+            send_command("add /home/sri/Music/sri_playlist.m3u")
+            app.logger.info("Started playing playlist.")
+            return "Your playlist is playing now.", 200  # Plain text response
+        except Exception as e:
+            error_message = f"Failed to play playlist: {e}"
+            app.logger.error(error_message)
+            return error_message, 500  # Relay the error back in the response        
     else:
-        return jsonify({"status": "VLC is already running"}), 400
+        app.logger.warning("VLC is not running. Cannot play playlist.")
+        return "VLC is not running. Start VLC server first.", 400  # Plain text response
+
 
 @app.route('/kill', methods=['POST'])
 def kill_vlc():
-    global vlc_process
-    if vlc_process is not None:
-        os.kill(vlc_process.pid, signal.SIGTERM)  # Terminate the VLC process
-        vlc_process = None
-        return jsonify({"status": "VLC has been stopped"}), 200
+    """Kill the VLC process."""
+    if is_vlc_running():
+        for proc in psutil.process_iter(['pid', 'name']):
+            if 'vlc' in proc.info['name']:
+                os.kill(proc.info['pid'], signal.SIGTERM)  # Kill the VLC process
+        app.logger.info("VLC process killed.")
+        return "VLC has been stopped.", 200  # Plain text response
     else:
-        return jsonify({"status": "VLC is not running"}), 400
-
-@app.route('/play', methods=['POST'])
-def play():
-    if vlc_process:
-        # Send the command to VLC through telnet or other means
-        send_command('play')
-        return jsonify({"status": "Playing"}), 200
-    return jsonify({"status": "VLC is not running"}), 400
-
-@app.route('/pause', methods=['POST'])
-def pause():
-    if vlc_process:
-        send_command('pause')
-        return jsonify({"status": "Paused"}), 200
-    return jsonify({"status": "VLC is not running"}), 400
+        app.logger.warning("VLC is not running. Cannot kill.")
+        return "VLC is not running right now.", 400  # Plain text response
 
 @app.route('/stop', methods=['POST'])
 def stop():
-    if vlc_process:
+    """Stop playback."""
+    if is_vlc_running():
         send_command('stop')
-        return jsonify({"status": "Stopped"}), 200
-    return jsonify({"status": "VLC is not running"}), 400
+        app.logger.info("Stopping VLC playback.")
+        return "Stopping your playlist.", 200  # Plain text response
+    else:
+        app.logger.warning("VLC is not running. Cannot stop playback.")
+        return "VLC is not running. Start VLC server first.", 400  # Plain text response
 
-@app.route('/volume/increase', methods=['POST'])
-def increase_volume():
-    if vlc_process:
-        send_command('volume +10')
-        return jsonify({"status": "Volume increased"}), 200
-    return jsonify({"status": "VLC is not running"}), 400
+@app.route('/play', methods=['POST'])
+def play():
+    start_vlc_server()
+    """Resume playback."""
+    if is_vlc_running():
+        send_command('play')
+        app.logger.info("Resumed VLC playback.")
+        return "Resuming your playlist.", 200  # Plain text response
+    else:
+        app.logger.warning("VLC is not running. Cannot resume playback.")
+        return "VLC is not running. Start VLC server first.", 400  # Plain text response
 
-@app.route('/volume/decrease', methods=['POST'])
-def decrease_volume():
-    if vlc_process:
-        send_command('volume -10')
-        return jsonify({"status": "Volume decreased"}), 200
-    return jsonify({"status": "VLC is not running"}), 400
+@app.route('/pause', methods=['POST'])
+def pause():
+    """Pause playback."""
+    if is_vlc_running():
+        send_command('pause')
+        app.logger.info("Paused VLC playback.")
+        return "Playback paused.", 200  # Plain text response
+    else:
+        app.logger.warning("VLC is not running. Cannot pause playback.")
+        return "VLC is not running. Start VLC server first.", 400  # Plain text response
 
-@app.route('/seek/<int:seconds>', methods=['POST'])
-def seek(seconds):
-    if vlc_process:
-        command = f'seek {seconds}'
-        send_command(command)
-        return jsonify({"status": f"Seeked to {seconds} seconds"}), 200
-    return jsonify({"status": "VLC is not running"}), 400
+@app.route('/next', methods=['POST'])
+def next_track():
+    """Skip to the next track."""
+    if is_vlc_running():
+        send_command('next')
+        app.logger.info("Skipped to next track.")
+        return "Skipped to the next track.", 200  # Plain text response
+    else:
+        app.logger.warning("VLC is not running. Cannot skip to next track.")
+        return "VLC is not running. Start VLC server first.", 400  # Plain text response
+
+@app.route('/previous', methods=['POST'])
+def previous_track():
+    """Go to the previous track."""
+    if is_vlc_running():
+        send_command('prev')
+        app.logger.info("Playing the previous track.")
+        return "Playing the previous track.", 200  # Plain text response
+    else:
+        app.logger.warning("VLC is not running. Cannot play the previous track.")
+        return "VLC is not running. Start VLC server first.", 400  # Plain text response
+
+@app.route('/status', methods=['GET'])
+def get_status():
+    """Get the status of VLC."""
+    if is_vlc_running():
+        app.logger.info("VLC is running.")
+        return "VLC is currently running.", 200  # Plain text response
+    else:
+        app.logger.warning("VLC is not running.")
+        return "VLC is not running right now.", 400  # Plain text response
 
 def send_command(command):
+    """Send command to VLC through the remote control interface."""
     import telnetlib
-
     HOST = "localhost"
     PORT = 4212
 
@@ -92,14 +156,16 @@ def send_command(command):
             tn.write((command + "\n").encode('utf-8'))
             tn.read_until(b'>')
     except Exception as e:
-        print(f"Error sending command to VLC: {e}")
+        app.logger.error(f"Error sending command to VLC: {e}")
+        raise e
+
 
 if __name__ == '__main__':
-    # Check if Homebridge is already running
     if not is_homebridge_running():
-        # Start Homebridge in a separate process
         subprocess.Popen(['homebridge'])
-        print("Homebridge started and playlist is playing.")
+        app.logger.info("Homebridge started.")
+
+    start_vlc_server()
 
     app.run(host='0.0.0.0', port=5000)
 
